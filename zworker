@@ -1,0 +1,173 @@
+#!/usr/bin/env python
+#
+# Copyright (c) 2010 Samuel Tardieu <sam@rfc1149.net>
+#
+from __future__ import print_function
+"""Worker for the enhanced request broker."""
+
+import functools
+import zmq
+import yaml
+import os
+import struct
+import subprocess
+
+COOKIE_TEST_INTERVAL = 5000
+interrupted = False
+error = 0
+
+# Compatibility between Python 2 and Python 3
+def to_bytes(n):
+    try:
+        return bytes(str(n))
+    except TypeError:
+        return bytes(str(n), "ascii")
+
+class EReconnect(RuntimeError):
+    pass
+
+class Worker(object):
+    """Worker class. One of `process` or `process_multipart` must
+    be overriden for this class to be usable."""
+
+    class Error(Exception):
+        """Exception raised when something went wrong in the
+        worker."""
+        pass
+
+    def __init__(self, context, requests_addr, replies_addr, watch_path):
+        """Create a new Worker object getting its data
+        from requests_addr and sending its replies to
+        replies_addr. It the context is None, a new one
+        with one I/O thread will be created."""
+        self.requests_addr = requests_addr
+        self.context = context or zmq.Context(1)
+        self.requests = self.context.socket(zmq.REQ)
+        self.requests.connect(requests_addr)
+        self.replies = self.context.socket(zmq.PUSH)
+        self.replies.connect(replies_addr)
+        self.poller = zmq.Poller()
+        self.poller.register(self.requests, zmq.POLLIN)
+        self.watch_path = watch_path
+        self.watch_mtime = os.path.getmtime(self.watch_path)
+
+    def request_and_process_task(self):
+        """Request a new task to do and call `process_multipart` to
+        process it then send the answer."""
+        if not interrupted:
+            self.requests.send(b"requesting task")  # TODO: if interrupted (SIGUSR1), we could send a different message
+        while not interrupted:
+            # print("xxx")  # TODO: use self.replies to send heartbeat
+            socks = dict(self.poller.poll(COOKIE_TEST_INTERVAL))
+            self.check_broker()  # test for broker change
+            if socks.get(self.requests) == zmq.POLLIN:
+                task = self.requests.recv_multipart()
+                if not task:
+                    print("WORKER: got notask ???")
+                    break
+                else:
+                    answer = task[:1] + self.process_multipart(task[1:])
+                    self.replies.send_multipart(answer)
+                    break
+
+    def check_broker(self):
+        try:
+            mtime = os.path.getmtime(self.watch_path)
+        except OSError:
+            print("WORKER: broker down; sleeping")
+            self.close()
+            raise EReconnect()
+        if mtime != self.watch_mtime:
+            print("WORKER: broker changed; rebooting")
+            self.close()
+            raise EReconnect()
+
+    def run(self):
+        """Process requests forever."""
+        while not interrupted:
+            request_and_process_task()
+
+    def process_multipart(self, request):
+        """Process an incoming multipart request. This method or
+        `process` should be overriden. By default, it calls
+        `process` after flattening the data. Return a multipart
+        answer."""
+        return [self.process(functools.reduce(lambda a, b: a + b, request))]
+
+    def process(self, data):
+        """Process a flat request. This method or `process_multipart`
+        should be overriden. Return a flat answer."""
+        raise Worker.Error("one of `process` or `process_multipart` "
+                           "should be overriden")
+
+    def close(self):
+        # TODO: this class should be (or provide) a context manager such that we can call close() safely
+        self.requests.setsockopt(zmq.LINGER, 0)
+        self.requests.close()
+        self.replies.setsockopt(zmq.LINGER, 0)
+        self.replies.close()
+        self.poller.unregister(self.requests)
+        self.context.term()
+
+
+class TestWorker(Worker):
+    def process(self, data):
+        cmd_data = yaml.load(data)
+        cmd = cmd_data.pop('=')  # '=' can't occur in environment
+        env = dict(os.environ)
+        env.update(cmd_data)
+        print("WORKER: Received request %s" % cmd)
+        erl = subprocess.call(cmd, shell=True, env=env)
+        # 128 : retry and exit worker
+        # 75  : retry and keep processing new requests
+        # 255 : do not retry and exit
+        if erl == 128 or erl == 255:
+            print('WORKER: command terminated with fatal error code, shutting down worker')
+            global interrupted
+            global error
+            interrupted = True
+            error = erl
+        if erl == 128 or erl == 75:
+            print('WORKER: signaling broker to retry command')
+            return b""  # magic return value, request requeueing of job
+        else:
+            return struct.pack('>i', erl)
+
+    def run(self):
+        while not interrupted:
+            print("WORKER: Asking for a request")
+            self.request_and_process_task()
+
+
+def stop(signum, frame):
+    print('WORKER: shutting down')
+    global interrupted
+    global error
+    interrupted = True
+    error = 1  # set exit status to error such that the calling shell script can process the signal too, if it wants
+
+
+if __name__ == '__main__':
+    import time
+    import signal
+    import sys
+    signal.signal(signal.SIGUSR1, stop)
+    cookie_fname = os.path.expanduser('~/.zmq-broker')
+    while not interrupted:
+        try:
+            with open(cookie_fname) as f:
+                conf = yaml.load(f)
+        except IOError:
+            # print("broker down; sleeping")
+            time.sleep(5)
+            continue
+        print('WORKER: connecting', conf['workers_addr'], conf['answers_addr'])
+        try:
+            TestWorker(None, conf['workers_addr'], conf['answers_addr'], cookie_fname).run()
+        except EReconnect:
+            pass
+    sys.exit(error)
+
+
+
+

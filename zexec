@@ -1,0 +1,57 @@
+#!/usr/bin/env python
+#
+# Copyright (c) 2010 Samuel Tardieu <sam@rfc1149.net>
+#
+import zmq
+import struct
+import sys
+
+
+# Compatibility between Python 2 and Python 3
+def to_bytes(n):
+    try:
+        return bytes(str(n))
+    except TypeError:
+        return bytes(str(n), "ascii")
+
+
+class TestClient(object):
+    def __init__(self, context, address, command):
+        super(TestClient, self).__init__()
+        self.context = context
+        self.command = command
+        self.sock = context.socket(zmq.REQ)
+        self.sock.connect(address)
+
+    def run(self):
+        self.sock.send(to_bytes(self.command))
+        answer = self.sock.recv()
+        if answer == b"":
+            # TODO: we should ideally distinguigh the tow cases: (a) job was submitted multiple times but always failed
+            # TODO: due to return value 128 (b) the job failed because all workers died
+            # TODO: work on a better protocol for return values
+            sys.stderr.write('REXEC: submission failed\n')
+            return 1
+        else:
+            return struct.unpack('>i', answer)[0]
+
+
+if __name__ == '__main__':
+    import os
+    import yaml
+
+    with open(os.path.expanduser('~/.zmq-broker')) as f:
+        conf = yaml.load(f)
+
+    context = zmq.Context(1)
+    cmd_data = {k: v for k, v in os.environ.items() if k[0:4] == 'WEST'}  # TODO: turn into option
+    cmd_data['='] = ' '.join(sys.argv[1:])  # '=' can't be a environment key
+    erl = TestClient(context, conf['requests_addr'], yaml.dump(cmd_data)).run()
+    sys.exit(erl)
+    # TODO: come up with a good way for error handling; when should we retry and when should be give up?
+    # TODO: Maybe always retry with a sleep before that (increasing sleep intervals?)
+    # TODO: should all resubmission be done in the broker and non here?
+    # TODO: if there is something globally bad, like filesystem error abort
+    # TODO: if this is some local error, like single GPU error resubmit
+    # TODO: could try a job on different nodes, if they fail consistently (say on 3 different nodes), give up
+    # TODO: protocol would involve sending the host name (save which host got which job + number of failures per node...)
