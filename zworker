@@ -11,8 +11,9 @@ import yaml
 import os
 import struct
 import subprocess
+import datetime
 
-COOKIE_TEST_INTERVAL = 5000
+COOKIE_TEST_INTERVAL = 5000  # ms
 interrupted = False
 error = 0
 
@@ -35,7 +36,7 @@ class Worker(object):
         worker."""
         pass
 
-    def __init__(self, context, requests_addr, replies_addr, watch_path):
+    def __init__(self, context, requests_addr, replies_addr, watch_path, timeout):
         """Create a new Worker object getting its data
         from requests_addr and sending its replies to
         replies_addr. It the context is None, a new one
@@ -50,13 +51,15 @@ class Worker(object):
         self.poller.register(self.requests, zmq.POLLIN)
         self.watch_path = watch_path
         self.watch_mtime = os.path.getmtime(self.watch_path)
+        self.timeout = timeout
 
     def request_and_process_task(self):
         """Request a new task to do and call `process_multipart` to
         process it then send the answer."""
         if not interrupted:
             self.requests.send(b"requesting task")  # TODO: if interrupted (SIGUSR1), we could send a different message
-        while not interrupted:
+        while not interrupted and datetime.datetime.now() < self.timeout:
+            print("WORKER", datetime.datetime.now() < self.timeout, datetime.datetime.now(), self.timeout)
             # print("xxx")  # TODO: use self.replies to send heartbeat
             socks = dict(self.poller.poll(COOKIE_TEST_INTERVAL))
             self.check_broker()  # test for broker change
@@ -84,7 +87,7 @@ class Worker(object):
 
     def run(self):
         """Process requests forever."""
-        while not interrupted:
+        while not interrupted and datetime.datetime.now() < self.timeout:
             request_and_process_task()
 
     def process_multipart(self, request):
@@ -134,7 +137,7 @@ class TestWorker(Worker):
             return struct.pack('>i', erl)
 
     def run(self):
-        while not interrupted:
+        while not interrupted and datetime.datetime.now() < self.timeout:
             print("WORKER: Asking for a request")
             self.request_and_process_task()
 
@@ -151,9 +154,22 @@ if __name__ == '__main__':
     import time
     import signal
     import sys
+    import argparse
+
+    parser = argparse.ArgumentParser(description='execute job from zbroker')
+    parser.add_argument('--walltime', default=None,
+                        help='maximum walltime to keep running and executing jobs; format=HH:MM')
+
+    args = parser.parse_args()
+    if args.walltime is None:
+        timeout = datetime.date.max
+    else:
+        h, m = args.walltime.split(':')
+        timeout = datetime.timedelta(hours=float(h), minutes=float(m)) + datetime.datetime.now()
+
     signal.signal(signal.SIGUSR1, stop)
     cookie_fname = os.path.expanduser('~/.zmq-broker')
-    while not interrupted:
+    while not interrupted and datetime.datetime.now() < timeout:
         try:
             with open(cookie_fname) as f:
                 conf = yaml.load(f)
@@ -163,7 +179,7 @@ if __name__ == '__main__':
             continue
         print('WORKER: connecting', conf['workers_addr'], conf['answers_addr'])
         try:
-            TestWorker(None, conf['workers_addr'], conf['answers_addr'], cookie_fname).run()
+            TestWorker(None, conf['workers_addr'], conf['answers_addr'], cookie_fname, timeout).run()
         except EReconnect:
             pass
     sys.exit(error)

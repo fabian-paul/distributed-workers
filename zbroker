@@ -14,7 +14,7 @@ import zmq
 from datetime import datetime
 import yaml
 
-interrupted=False
+interrupted = False
 
 # Compatibility between Python 2 and Python 3
 def to_bytes(n):
@@ -196,6 +196,8 @@ class Broker:
                 'workers_addr':  'tcp://%s:%s'%(hostname, workers_port),
                 'answers_addr':  'tcp://%s:%s'%(hostname, answers_port)}
         return conf
+        # TODO: generate some random secret string that agents connecting us could use as credentials
+        # OTOH: python and secure can't be in the same sentence, except this very sentence.
 
     def run(self):
         """Run forever."""
@@ -273,6 +275,7 @@ if __name__ == '__main__':
 
     with open(cookie_fname, 'w') as f:
         yaml.dump(b.client_information, f)
+    os.chmod(cookie_fname, 384)  # octal 600
 
     def delete_cookie():
         if os.path.exists(cookie_fname):
