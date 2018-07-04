@@ -59,7 +59,6 @@ class Worker(object):
         if not interrupted:
             self.requests.send(b"requesting task")  # TODO: if interrupted (SIGUSR1), we could send a different message
         while not interrupted and datetime.datetime.now() < self.timeout:
-            print("WORKER", datetime.datetime.now() < self.timeout, datetime.datetime.now(), self.timeout)
             # print("xxx")  # TODO: use self.replies to send heartbeat
             socks = dict(self.poller.poll(COOKIE_TEST_INTERVAL))
             self.check_broker()  # test for broker change
@@ -162,7 +161,7 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     if args.walltime is None:
-        timeout = datetime.date.max
+        timeout = datetime.datetime(datetime.date.max.year, datetime.date.max.month, datetime.date.max.day)
     else:
         h, m = args.walltime.split(':')
         timeout = datetime.timedelta(hours=float(h), minutes=float(m)) + datetime.datetime.now()
